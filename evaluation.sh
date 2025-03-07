@@ -26,4 +26,4 @@ python main_mp.py --model_config model_cfg.json --pipeline_config ./policy/uvm_C
 # Automated training pipeline configuration 
 # add --GPUcap N to constrain the number of GPUs to be used to no larger than N
 # save the accuracy results of 5 runs with 400 epochs
-python auto_run.py --model_config model_acc_cfg.json --save_result
+python auto_run.py --model_config model_cfg.json

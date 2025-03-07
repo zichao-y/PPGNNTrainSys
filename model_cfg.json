@@ -25,5 +25,6 @@
   "eval_step": 10,
   "chunk_size": 1,
   "col_split": 1,
-  "save_json": true
+  "save_json": true,
+  "save_result": true
 }
