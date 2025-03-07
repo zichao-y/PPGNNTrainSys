@@ -1,0 +1,11 @@
+{
+  "device": 0,
+  "mode": "gds",
+  "trail_profile": true,
+  "epochs": 1,
+  "runs": 1,
+  "save_result": false,
+  "save_model": false,
+  "test_start_epoch": 2
+}
+

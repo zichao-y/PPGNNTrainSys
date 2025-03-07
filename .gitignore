@@ -1,0 +1,11 @@
+__pycache__/
+cufile.log
+data/
+tensorboard_log/
+results/
+temp_*.json
+async_fetch/**/*.egg-info/
+async_fetch/build/
+gds_read/**/*.egg-info/
+gds_read/build/
+

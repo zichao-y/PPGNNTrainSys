@@ -1,0 +1,6 @@
+{
+  "device": 0,
+  "mode": "uvm",
+  "pin_memory": true,
+  "chunk_size": 8000
+}

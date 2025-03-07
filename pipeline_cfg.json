@@ -1,0 +1,6 @@
+{
+  "device": 0,
+  "mode": "gpu",
+  "gpu_ids": [0, 1, 2, 3],
+  "pin_memory": true
+}

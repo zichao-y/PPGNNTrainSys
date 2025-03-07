@@ -1,0 +1,6 @@
+{
+  "device": 0,
+  "mode": "gpu",
+  "chunk_size": 1,
+  "load_all": true
+}
