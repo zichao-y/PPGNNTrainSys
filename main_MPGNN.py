@@ -136,10 +136,10 @@ class SAGE(nn.Module):
         #     end = torch.cuda.Event(enable_timing=True)  
         #     start.record()
         feat = g.ndata["feat"]
-        print(f'g is on device: {g.device}')
+        # print(f'g is on device: {g.device}')
         sampler = MultiLayerFullNeighborSampler(1, prefetch_node_feats=["feat"])
         use_uva = g.device.type == 'cpu' and device.type != 'cpu'
-        print(f'Use UVA: {use_uva}, device:{device}, g.device:{g.device}')
+        # print(f'Use UVA: {use_uva}, device:{device}, g.device:{g.device}')
         dataloader = DataLoader(
             g,
             torch.arange(g.num_nodes()).to(device),

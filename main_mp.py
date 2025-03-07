@@ -114,7 +114,7 @@ def create_shared_tensor(tensor):
     shared_tensor = tensor.share_memory_()
     return shared_tensor
 
-def main(rank, world_size, train_data_shared, valid_data_shared, test_data_shared, labels, split_idx, num_classes, in_dim, dim_i, data_path, args):
+def main(rank, world_size, train_data_shared, train_labels, valid_data_shared, test_data_shared, labels, split_idx, num_classes, in_dim, dim_i, data_path, args):
     wall_start = time.time()
     command_string = ' '.join(sys.argv)
     ddp_setup(rank, world_size)
@@ -152,6 +152,20 @@ def main(rank, world_size, train_data_shared, valid_data_shared, test_data_share
     else:
         eval_func = eval_acc_gpu
 
+    
+    if args.mode == 'gpu':
+        train_data_pinned = split_tensor_round_robin(train_data_shared, world_size, rank).to(device)
+        train_labels = split_tensor_round_robin(train_labels, world_size, rank).to(device)
+        gc.collect()
+    elif args.mode == 'uvm':
+        train_data_pinned = train_data_shared
+        train_labels = train_labels.to(device)
+        gc.collect()
+    
+    # assume batch_size is multiple of chunk_size
+    num_chunks = train_data_pinned.size(0) // args.chunk_size
+    chunks_per_batch = args.batch_size // args.chunk_size
+
     logger = Logger(args.runs, args)
     # Get the current time
     now = datetime.now()
@@ -167,23 +181,6 @@ def main(rank, world_size, train_data_shared, valid_data_shared, test_data_share
             print(">>>>> Write TensorBoard logs to {}".format(tensorboard_dir))
             # Initialize TensorBoard writer
             writer = SummaryWriter(tensorboard_dir)
-
-        train_idx_run = split_idx['train']
-        
-        if args.mode == 'gpu':
-            train_labels = labels[train_idx_run]
-            train_data_pinned = split_tensor_round_robin(train_data_shared, world_size, rank).to(device)
-            train_labels = split_tensor_round_robin(train_labels, world_size, rank).to(device)
-            gc.collect()
-        elif args.mode == 'uvm':
-            train_labels = labels[train_idx_run]
-            train_data_pinned = train_data_shared
-            train_labels = train_labels.to(device)
-            gc.collect()
-        
-        # assume batch_size is multiple of chunk_size
-        num_chunks = train_data_pinned.size(0) // args.chunk_size
-        chunks_per_batch = args.batch_size // args.chunk_size
         
         optimizer = torch.optim.Adam(model.parameters(),weight_decay=args.weight_decay, lr=args.lr)
         best_val = float('-inf')
@@ -307,24 +304,20 @@ def main(rank, world_size, train_data_shared, valid_data_shared, test_data_share
                     if epochs_no_improve == args.patience:
                         print("Early stopping!")
                         break
-        if args.trail_profile:
-            # 1. Measure peak CPU memory usage for this rank
-            peak_mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
-            # On Linux, ru_maxrss is in KB; on macOS, it's in bytes, so adjust if needed
-            peak_mem_tensor = torch.tensor([peak_mem_kb], dtype=torch.float64, device=device)
-            # 2. Sum across all ranks using all_reduce
-            torch.distributed.all_reduce(peak_mem_tensor, op=torch.distributed.ReduceOp.SUM)        
-        # release pinned CPU memory for the current run
-        train_data_pinned = None
-        torch.cuda.empty_cache()
-        gc.collect()
+            
+        # if args.trail_profile:
+        #     # 1. Measure peak CPU memory usage for this rank
+        #     peak_mem_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+        #     # On Linux, ru_maxrss is in KB; on macOS, it's in bytes, so adjust if needed
+        #     peak_mem_tensor = torch.tensor([peak_mem_kb], dtype=torch.float64, device=device)
+        #     # 2. Sum across all ranks using all_reduce
+        #     torch.distributed.all_reduce(peak_mem_tensor, op=torch.distributed.ReduceOp.SUM)        
 
         if rank == 0:            
             end_to_end_time = time.time() - wall_start
             print(f'Average epoch time: {total_time / (args.epochs -5)/1000 :.4f} sec')
             print(f'Average memory: {total_memory / (args.epochs -5)/1.07e9 :.4f} GB')
             if args.save_json:
-                use_rnn = args.num_layers > 0
                 json_file_path = args.json_file_path + f'{args.dataset}-{args.method}-MultiProcess-mode_{args.mode}-chunksize_{args.chunk_size}-time-memory.json'
                 metrics = {
                     'epoch_time': total_time / (args.epochs -5)/1000,
@@ -341,14 +334,15 @@ def main(rank, world_size, train_data_shared, valid_data_shared, test_data_share
                 plot_curve(tensorboard_dir)
                 print(">>>>> Plot training curve to {}".format(tensorboard_dir))
             print(">>>>> Write TensorBoard logs to {}".format(tensorboard_dir))
+        torch.distributed.barrier()
     if rank == 0:
         if args.epochs-1 > args.test_start_epoch:
             results = logger.print_statistics()
             print("results: \n", results)
             if args.save_result:
                 save_result(args, results, command_string)
-        if args.trail_profile:
-            print(f"Peak CPU memory usage: {peak_mem_tensor.item() / 1e6:.2f} GB")
+        # if args.trail_profile:
+        #     print(f"Peak CPU memory usage: {peak_mem_tensor.item() / 1e6:.2f} GB")
 
     destroy_process_group()
     return
@@ -366,8 +360,24 @@ if __name__ == '__main__':
     
     if args.mode == 'gpu' or args.mode == 'uvm':
         train_data = load_data(in_dim, args, 'train') 
+        train_label = labels[split_idx['train']]
+        # Pad the train data so that it can be evenly divided by the number of GPUs to make sure each GPU has the same amount of batches
+        if train_data.size(0) % args.batch_size != 0:
+            pad_low = args.batch_size - train_data.size(0) % args.batch_size
+            num_batches = (train_data.size(0) + pad_low) // args.batch_size
+        else:
+            pad_low = 0
+            num_batches = train_data.size(0) // args.batch_size
+        if num_batches % world_size != 0:
+            pad_batch = world_size - num_batches % world_size
+            pad_total = pad_batch * args.batch_size + pad_low
+            # generate a random index of size pad_total
+            pad_idx = torch.randint(0, train_data.size(0), (pad_total,))
+            train_data = torch.cat([train_data, train_data[pad_idx]])
+            train_label = torch.cat([train_label, train_label[pad_idx]])    
     else:
         raise NotImplementedError('Only support GPU and UVM mode for multi-threading')
+    
     if args.load_all or args.eval_load_host:
         valid_data = load_data(in_dim, args, 'val')
         test_data = load_data(in_dim, args, 'test')
@@ -376,8 +386,5 @@ if __name__ == '__main__':
     else:
         valid_data_shared = None
         test_data_shared = None
-    # if args.pin_memory:
-    #     train_data = train_data.pin_memory()
-    #     gc.collect()
     train_data_shared = create_shared_tensor(train_data)
-    mp.spawn(main, args=(world_size, train_data_shared, valid_data_shared, test_data_shared, labels, split_idx, num_classes, in_dim, dim_i, data_path, args), nprocs=world_size, join=True)
+    mp.spawn(main, args=(world_size, train_data_shared, train_label, valid_data_shared, test_data_shared, labels, split_idx, num_classes, in_dim, dim_i, data_path, args), nprocs=world_size, join=True)

@@ -128,6 +128,7 @@ def parser_add_main_args(parser):
     parser.add_argument('--input_dropout', type=float, default=0.0)
     parser.add_argument('--load_all', action='store_true')
     parser.add_argument('--full_path', action='store_true')
+    parser.add_argument('--train_data_duplicate', action='store_true')
     parser.add_argument('--save_dir', type=str, default='./data/')
     parser.add_argument('--epoch_thr', type=int, default=100)
     parser.add_argument('--acc_thr', type=float, default=0.5)

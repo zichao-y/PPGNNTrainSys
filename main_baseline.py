@@ -246,7 +246,6 @@ if __name__ == '__main__':
         print(f'Average epoch time: {total_time / (args.epochs -5)/1000 :.4f} sec')
         print(f'Average memory: {total_memory / (args.epochs -5)/1.07e9 :.4f} GB')
         if args.save_json:
-            use_rnn = args.num_layers > 0
             json_file_path = args.json_file_path + f'{args.dataset}-{args.method}-Baseline-time-memory.json'
             metrics = {
                 'epoch_time': total_time / (args.epochs -5)/1000,

@@ -18,12 +18,12 @@
   "training_hops": 3,
   "testing_hops": 3,
   "patience": 50,
-  "epochs": 100,
+  "epochs": 400,
   "batch_size": 8000,
-  "runs": 1,
+  "runs": 5,
   "test_start_epoch": 20,
   "eval_step": 10,
   "chunk_size": 1,
   "col_split": 1,
-  "save_json": true
+  "save_result": true
 }
