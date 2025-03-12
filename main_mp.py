@@ -114,7 +114,7 @@ def create_shared_tensor(tensor):
     shared_tensor = tensor.share_memory_()
     return shared_tensor
 
-def main(rank, world_size, train_data_shared, train_labels, valid_data_shared, test_data_shared, labels, split_idx, num_classes, in_dim, dim_i, data_path, args):
+def main(rank, world_size, train_data_shared, valid_data_shared, test_data_shared, labels, split_idx, num_classes, in_dim, dim_i, data_path, args):
     wall_start = time.time()
     command_string = ' '.join(sys.argv)
     ddp_setup(rank, world_size)
@@ -152,7 +152,7 @@ def main(rank, world_size, train_data_shared, train_labels, valid_data_shared, t
     else:
         eval_func = eval_acc_gpu
 
-    
+    train_labels = labels[split_idx['train']]
     if args.mode == 'gpu':
         train_data_pinned = split_tensor_round_robin(train_data_shared, world_size, rank).to(device)
         train_labels = split_tensor_round_robin(train_labels, world_size, rank).to(device)
@@ -181,7 +181,7 @@ def main(rank, world_size, train_data_shared, train_labels, valid_data_shared, t
             print(">>>>> Write TensorBoard logs to {}".format(tensorboard_dir))
             # Initialize TensorBoard writer
             writer = SummaryWriter(tensorboard_dir)
-        
+
         optimizer = torch.optim.Adam(model.parameters(),weight_decay=args.weight_decay, lr=args.lr)
         best_val = float('-inf')
         total_time = 0
@@ -192,6 +192,16 @@ def main(rank, world_size, train_data_shared, train_labels, valid_data_shared, t
         
         for epoch in range(args.epochs):
             with Join([model]):
+                model.train()
+                torch.cuda.synchronize()
+                torch.distributed.barrier()
+                if rank==0:
+                    if args.cpu:
+                        start = time.time()
+                    else:
+                        start = torch.cuda.Event(enable_timing=True)
+                        end = torch.cuda.Event(enable_timing=True)  
+                        start.record()
                 #permutate the chunks
                 if args.mode == 'gpu':
                     train_chunk_idx = torch.randperm(num_chunks, device=device)
@@ -206,13 +216,6 @@ def main(rank, world_size, train_data_shared, train_labels, valid_data_shared, t
                     num_batch = train_chunk_idx.size(0) // chunks_per_batch
                 else:
                     raise NotImplementedError('Only support GPU and UVM mode for multi-threading')
-                model.train()
-                if args.cpu:
-                    start = time.time()
-                else:
-                    start = torch.cuda.Event(enable_timing=True)
-                    end = torch.cuda.Event(enable_timing=True)  
-                    start.record()
                 
                 with torch.cuda.stream(load_A_stream):
                     buffer_A, labels_A = ping_pang_loader(load_A_stream, compute_A_stream, train_chunk_idx, chunks_per_batch, -1, train_data_pinned, train_labels, device, args, in_dim, 4, data_path)
@@ -334,7 +337,7 @@ def main(rank, world_size, train_data_shared, train_labels, valid_data_shared, t
                 plot_curve(tensorboard_dir)
                 print(">>>>> Plot training curve to {}".format(tensorboard_dir))
             print(">>>>> Write TensorBoard logs to {}".format(tensorboard_dir))
-        torch.distributed.barrier()
+        # torch.distributed.barrier()
     if rank == 0:
         if args.epochs-1 > args.test_start_epoch:
             results = logger.print_statistics()
@@ -357,26 +360,26 @@ if __name__ == '__main__':
     print(world_size)
     ### Load preprocessed data ###
     labels, split_idx, num_classes, in_dim, dim_i, num_nodes, data_path = load_meta_data(args)
-    
-    if args.mode == 'gpu' or args.mode == 'uvm':
-        train_data = load_data(in_dim, args, 'train') 
-        train_label = labels[split_idx['train']]
-        # Pad the train data so that it can be evenly divided by the number of GPUs to make sure each GPU has the same amount of batches
-        if train_data.size(0) % args.batch_size != 0:
-            pad_low = args.batch_size - train_data.size(0) % args.batch_size
-            num_batches = (train_data.size(0) + pad_low) // args.batch_size
-        else:
-            pad_low = 0
-            num_batches = train_data.size(0) // args.batch_size
-        if num_batches % world_size != 0:
-            pad_batch = world_size - num_batches % world_size
-            pad_total = pad_batch * args.batch_size + pad_low
-            # generate a random index of size pad_total
-            pad_idx = torch.randint(0, train_data.size(0), (pad_total,))
-            train_data = torch.cat([train_data, train_data[pad_idx]])
-            train_label = torch.cat([train_label, train_label[pad_idx]])    
-    else:
-        raise NotImplementedError('Only support GPU and UVM mode for multi-threading')
+    train_data = load_data(in_dim, args, 'train')
+    # if args.mode == 'gpu' or args.mode == 'uvm':
+    #     train_data = load_data(in_dim, args, 'train') 
+    #     train_label = labels[split_idx['train']]
+    #     # Pad the train data so that it can be evenly divided by the number of GPUs to make sure each GPU has the same amount of batches
+    #     if train_data.size(0) % args.batch_size != 0:
+    #         pad_low = args.batch_size - train_data.size(0) % args.batch_size
+    #         num_batches = (train_data.size(0) + pad_low) // args.batch_size
+    #     else:
+    #         pad_low = 0
+    #         num_batches = train_data.size(0) // args.batch_size
+    #     if num_batches % world_size != 0:
+    #         pad_batch = world_size - num_batches % world_size
+    #         pad_total = pad_batch * args.batch_size + pad_low
+    #         # generate a random index of size pad_total
+    #         pad_idx = torch.randint(0, train_data.size(0), (pad_total,))
+    #         train_data = torch.cat([train_data, train_data[pad_idx]])
+    #         train_label = torch.cat([train_label, train_label[pad_idx]])    
+    # else:
+    #     raise NotImplementedError('Only support GPU and UVM mode for multi-threading')
     
     if args.load_all or args.eval_load_host:
         valid_data = load_data(in_dim, args, 'val')
@@ -387,4 +390,4 @@ if __name__ == '__main__':
         valid_data_shared = None
         test_data_shared = None
     train_data_shared = create_shared_tensor(train_data)
-    mp.spawn(main, args=(world_size, train_data_shared, train_label, valid_data_shared, test_data_shared, labels, split_idx, num_classes, in_dim, dim_i, data_path, args), nprocs=world_size, join=True)
+    mp.spawn(main, args=(world_size, train_data_shared, valid_data_shared, test_data_shared, labels, split_idx, num_classes, in_dim, dim_i, data_path, args), nprocs=world_size, join=True)

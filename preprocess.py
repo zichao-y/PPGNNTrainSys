@@ -1,22 +1,48 @@
 import torch
 import argparse
-from torch_geometric.utils import to_undirected, remove_self_loops, add_self_loops
-from torch_sparse import SparseTensor
-from sklearn.neighbors import kneighbors_graph
+# from torch_sparse import SparseTensor
 import numpy as np
-import scipy
 from parse import parser_add_main_args
-from dataset import load_dataset
-from data_utils import load_fixed_splits
+from dataset import load_dataset, load_fixed_splits
 import os
 from tqdm import tqdm
 import time
 import gc
-from igb.dataloader import IGB260MDGLDataset
-from ogb.nodeproppred import DglNodePropPredDataset
 import dgl
 
+def create_coo(values, row, col, row_size, col_size):
+        indices = torch.stack([row, col], dim=0)
+        return torch.sparse_coo_tensor(indices, values, (row_size, col_size)).coalesce()
 
+def graph2adj_coo_new(edge_index, nnodes, output_type='dual'):
+    row, col = edge_index
+    # Check validity using tensor operations
+    if torch.isnan(row).any() or torch.isnan(col).any() or \
+       torch.isinf(row).any() or torch.isinf(col).any():
+        raise ValueError('row or col contains nan or inf')
+    if (row < 0).any() or (col < 0).any():
+        raise ValueError('row or col contains negative values')
+    if (row >= nnodes).any() or (col >= nnodes).any():
+        raise ValueError('row or col contains values greater than nnodes')
+
+    degree_vec = torch.bincount(row, minlength=nnodes)
+    with torch.no_grad():  # Prevent gradient tracking
+        d_inv_sqrt = torch.pow(degree_vec, -0.5)
+        d_inv_sqrt[torch.isinf(d_inv_sqrt) | torch.isnan(d_inv_sqrt)] = 0
+        
+    if output_type == 'dual':
+        dad_data = d_inv_sqrt[row] * d_inv_sqrt[col]
+        da_data = d_inv_sqrt[row] * d_inv_sqrt[row]
+        DAD = create_coo(dad_data, row, col, nnodes, nnodes)
+        DA = create_coo(da_data, row, col, nnodes, nnodes)
+        return DAD, DA
+    elif output_type == 'dad':
+        dad_data = d_inv_sqrt[row] * d_inv_sqrt[col]
+        return create_coo(dad_data, row, col, nnodes, nnodes)
+    else:
+        da_data = d_inv_sqrt[row] * d_inv_sqrt[row]
+        return create_coo(da_data, row, col, nnodes, nnodes)
+    
 def graph2adj_coo(edge_index, nnodes, output_type='dual'):
     row, col = edge_index
     # check row and col has no nan and inf
@@ -57,6 +83,66 @@ def graph2adj_coo(edge_index, nnodes, output_type='dual'):
         DA = SparseTensor(row=row, col=col, value=da_data_tensor, sparse_sizes=(nnodes, nnodes))
         return DA
 
+def spmm_blocks_sptensor_new(adj, features, device, block_size=1000000, col_size=8):
+    if not adj.is_sparse or adj.layout != torch.sparse_coo:
+        raise ValueError("adj must be a coalesced sparse COO tensor")
+    adj = adj.coalesce()
+    indices = adj.indices()
+    values = adj.values()
+
+    if not isinstance(features, torch.Tensor):
+        raise ValueError("features must be a torch.Tensor")
+    # Ensure features has no NaNs or Infs
+    if torch.isnan(features).any() or torch.isinf(features).any():
+        raise ValueError("features contains NaNs or Infs")
+
+    results = []
+    pbar_outer = tqdm(total=len(range(0, features.size(1), col_size)), desc="Feature Blocks")
+    for k in range(0, features.size(1), col_size):
+        end_idx = min(k + col_size, features.size(1))
+        feature_block = features[:, k:end_idx].to(device)
+        result_block = []
+        n_rows = adj.size(0)
+        pbar_inner = tqdm(total=len(range(0, n_rows, block_size)), desc="Processing", leave=False)
+        
+        for i in range(0, n_rows, block_size):
+            start_row = i
+            num_rows = min(block_size, n_rows - start_row)
+            end_row = start_row + num_rows
+
+            # Efficiently find the indices in the current block using binary search
+            start_idx = torch.searchsorted(indices[0], start_row)
+            end_idx = torch.searchsorted(indices[0], end_row, right=True)
+            block_indices = indices[:, start_idx:end_idx]
+            block_values = values[start_idx:end_idx]
+
+            if block_indices.size(1) == 0:
+                result = torch.zeros(num_rows, feature_block.size(1), device=device)
+            else:
+                # Adjust row indices for the block
+                block_indices_row = block_indices[0] - start_row
+                block_indices_adj = torch.stack([block_indices_row, block_indices[1]])
+                
+                # Create block sparse tensor on the device
+                block = torch.sparse_coo_tensor(
+                    block_indices_adj.to(device),
+                    block_values.to(device),
+                    (num_rows, adj.size(1)),
+                    device=device
+                ).coalesce()
+
+                # Perform sparse matrix multiplication
+                result = torch.sparse.mm(block, feature_block)
+            
+            result_block.append(result.cpu())
+            del block, result
+            pbar_inner.update(1)
+        pbar_inner.close()
+        result_block = torch.cat(result_block, dim=0)
+        results.append(result_block)
+        pbar_outer.update(1)
+    pbar_outer.close()
+    return torch.cat(results, dim=1)
 
 def spmm_blocks_sptensor(adj, features, device, block_size=1000000, col_size=8):
     # Ensure adj is a SparseTensor
@@ -134,9 +220,9 @@ def preprocess_savebinary_sepx(graph, split, name='ogbn-papers100M', hops=10, de
     col_size = features // col_split
     assert features % col_split == 0
     if kernel == 'dad' or kernel == 'dual':
-        norm_adj_dad_cpu = graph2adj_coo(graph.edges(), nnodes, output_type='dad')
+        norm_adj_dad_cpu = graph2adj_coo_new(graph.edges(), nnodes, output_type='dad')
     if kernel == 'da' or kernel == 'dual':
-        norm_adj_da_cpu = graph2adj_coo(graph.edges(), nnodes, output_type='da')
+        norm_adj_da_cpu = graph2adj_coo_new(graph.edges(), nnodes, output_type='da')
     
     
     train_idx = split['train']
@@ -176,9 +262,9 @@ def preprocess_savebinary_sepx(graph, split, name='ogbn-papers100M', hops=10, de
         for i in range(hops):
             if block_size > 0:
                 if kernel == 'da' or kernel == 'dual':  
-                    high_order_features_da = spmm_blocks_sptensor(norm_adj_da_cpu, high_order_features_da, device, block_size, block_col_size)
+                    high_order_features_da = spmm_blocks_sptensor_new(norm_adj_da_cpu, high_order_features_da, device, block_size, block_col_size)
                 if kernel == 'dad' or kernel == 'dual':
-                    high_order_features_dad = spmm_blocks_sptensor(norm_adj_dad_cpu, high_order_features_dad, device, block_size, block_col_size)
+                    high_order_features_dad = spmm_blocks_sptensor_new(norm_adj_dad_cpu, high_order_features_dad, device, block_size, block_col_size)
             else:
                 if kernel == 'da' or kernel == 'dual':
                     high_order_features_da = norm_adj_da @ high_order_features_da.to(device)
@@ -227,30 +313,6 @@ def preprocess_savebinary_sepx(graph, split, name='ogbn-papers100M', hops=10, de
     
     return 
 
-def pagraph_save(edge_index, x, save_dir, name, y, split):
-    data_path = save_dir + 'pagraph/' + name + '/'
-    if not os.path.exists(data_path):
-        os.makedirs(data_path)
-    nnodes = x.shape[0]
-    row, col = edge_index
-    adj = SparseTensor(row=row, col=col, sparse_sizes=(nnodes, nnodes))
-    adj = adj.to_scipy(layout='coo')
-    scipy.sparse.save_npz(data_path + 'adj.npz', adj)
-    # convert x to numpy array
-    np.save(data_path + 'feat.npy', x.numpy())
-    np.save(data_path + 'labels.npy', y.numpy())
-    # convert split into masks for train, valid, test
-    train_mask = torch.zeros(nnodes, dtype=torch.bool)
-    train_mask[split['train']] = 1
-    valid_mask = torch.zeros(nnodes, dtype=torch.bool)
-    valid_mask[split['valid']] = 1
-    test_mask = torch.zeros(nnodes, dtype=torch.bool)
-    test_mask[split['test']] = 1
-    np.save(data_path + 'train.npy', train_mask.numpy())
-    np.save(data_path + 'val.npy', valid_mask.numpy())
-    np.save(data_path + 'test.npy', test_mask.numpy())
-    return
-
 def gnnlab_save(edge_index, x, save_dir, name, y, split, use_pca=False, PCA_dim=64, QUANT=False, data_type='int8'):
     
     data_path = save_dir + 'gnnlab/' + name + '/'
@@ -262,7 +324,8 @@ def gnnlab_save(edge_index, x, save_dir, name, y, split, use_pca=False, PCA_dim=
     labels.tofile(data_path + 'label.bin')
     nnodes = x.shape[0]
     row, col = edge_index
-    adj = SparseTensor(row=row, col=col, sparse_sizes=(nnodes, nnodes))
+    values = np.ones(row.shape[0])
+    adj = create_coo(values, row, col, nnodes, nnodes)
     adj = adj.to_scipy(layout='csr')
     indptr = adj.indptr.astype(np.uint32)
     indptr.tofile(data_path + 'indptr.bin')
@@ -315,68 +378,36 @@ def main():
     print(f"device: {device}")
     now = time.time()
     ### Load and preprocess data ###
-    if args.dataset == 'igb':
-        dataset = IGB260MDGLDataset(args)
-        graph = dataset[0]
-        c = args.num_classes
-        d = 1024
-        train_idx = torch.nonzero(graph.ndata['train_mask'], as_tuple=True)[0]
-        val_idx = torch.nonzero(graph.ndata['val_mask'], as_tuple=True)[0]
-        test_idx = torch.nonzero(graph.ndata['test_mask'], as_tuple=True)[0]
-        split_idx = {'train': train_idx, 'valid': val_idx, 'test': test_idx}
-        
-    elif args.dataset == 'ogbn-papers100M':
-        dataset = DglNodePropPredDataset(name=args.dataset, root=f'{args.data_dir}/ogb')
-        graph, labels = dataset[0]
-        # Convert the graph to an undirected (bidirected) graph
-        g_sym = dgl.to_bidirected(graph)
-        g_sym.ndata.update(graph.ndata)
-        graph=g_sym
-        # Obtain the split indices
-        split_idx = dataset.get_idx_split()
-        split_idx = {key: torch.as_tensor(
-            split_idx[key]) for key in split_idx}
-        c = 172
-        d = graph.ndata['feat'].shape[1]
-        n = graph.num_nodes()
-        graph.ndata['label'] = labels.long()
+    
+    dataset = load_dataset(args.data_dir, args.dataset, args)
+    graph = dataset.graph['dgl']
+    # Apply DGL transformations based on args
+    ndata = graph.ndata
+    if not args.directed and args.dataset != 'ogbn-proteins':
+        graph = dgl.to_bidirected(graph)
+    if args.self_loops:
+        graph = dgl.remove_self_loop(graph)
+        graph = dgl.add_self_loop(graph)
+    graph.ndata.update(ndata)
+
+    if len(dataset.label.shape) == 1:
+        dataset.label = dataset.label.unsqueeze(1)
+    
+    if args.rand_split:
+        split_idx = dataset.get_idx_split(train_prop=args.train_prop, valid_prop=args.valid_prop)
+                        
+    elif args.rand_split_class:
+        split_idx = dataset.get_idx_split(split_type='class', label_num_per_class=args.label_num_per_class)
+                        
+    elif args.dataset in ['ogbn-proteins', 'ogbn-arxiv', 'ogbn-products', 'amazon2m', 'igb']:
+        split_idx = dataset.load_fixed_splits()
+                        
     else:
-        dataset = load_dataset(args.data_dir, args.dataset, args.sub_dataset)
-        if len(dataset.label.shape) == 1:
-            dataset.label = dataset.label.unsqueeze(1)
-        
-        if args.rand_split:
-            split_idx = dataset.get_idx_split(train_prop=args.train_prop, valid_prop=args.valid_prop)
-                            
-        elif args.rand_split_class:
-            split_idx = dataset.get_idx_split(split_type='class', label_num_per_class=args.label_num_per_class)
-                            
-        elif args.dataset in ['ogbn-proteins', 'ogbn-arxiv', 'ogbn-products', 'amazon2m']:
-            split_idx = dataset.load_fixed_splits()
-                           
+        if args.dataset == 'fb100':
+            name='fb100-'+args.sub_dataset
         else:
-            if args.dataset == 'fb100':
-                name='fb100-'+args.sub_dataset
-            else:
-                name=args.dataset
-            split_idx = load_fixed_splits(args.data_dir, dataset, name=name, protocol=args.protocol)
-
-        if args.dataset in ('mini', '20news'):
-            adj_knn = kneighbors_graph(dataset.graph['node_feat'], n_neighbors=args.knn_num, include_self=True)
-            edge_index = torch.tensor(adj_knn.nonzero(), dtype=torch.long)
-            dataset.graph['edge_index']=edge_index
-
-        # whether or not to symmetrize
-        if not args.directed and args.dataset != 'ogbn-proteins':
-            dataset.graph['edge_index'] = to_undirected(dataset.graph['edge_index'])
-        # whether or not to add self loops
-        if args.self_loops:
-            dataset.graph['edge_index'], _ = remove_self_loops(dataset.graph['edge_index'])
-            dataset.graph['edge_index'], _ = add_self_loops(dataset.graph['edge_index'], num_nodes=dataset.graph['num_nodes'])
-        edge_index = dataset.graph['edge_index']
-        graph = dgl.graph((edge_index[0], edge_index[1]), num_nodes=dataset.graph['num_nodes'])
-        graph.ndata['feat'] = dataset.graph['node_feat'].contiguous()
-        graph.ndata['label'] = dataset.label.long().contiguous()
+            name=args.dataset
+        split_idx = load_fixed_splits(args.data_dir, dataset, name=name, protocol=args.protocol)
         
     
     if args.tognnlab:
@@ -385,16 +416,12 @@ def main():
             name = 'igb_' + args.dataset_size
         else:
             name = args.dataset
-        if args.dataset == 'ogbn-papers100M':
-            gnnlab_save(graph.edges(), graph.ndata['feat'], args.save_dir, name, labels, split_idx, use_pca=args.use_pca, PCA_dim=args.pca_dim, QUANT=quantize, data_type=args.data_type)
-        else:
-            gnnlab_save(dataset.graph['edge_index'], dataset.graph['node_feat'], args.save_dir, name, dataset.label, split_idx, use_pca=args.use_pca, PCA_dim=args.pca_dim, QUANT=quantize, data_type=args.data_type)
+        
+        gnnlab_save(graph.edges(), graph.ndata['feat'], args.save_dir, name, labels, split_idx, use_pca=args.use_pca, PCA_dim=args.pca_dim, QUANT=quantize, data_type=args.data_type)
         exit()
     
-    if args.dataset == 'igb' or args.dataset == 'ogbn-papers100M':
-        labels = graph.ndata['label']
-    else:
-        labels = dataset.label
+    labels = graph.ndata['label']
+    # print(f'train_data length: {len(split_idx["train"])}')
     time_start = time.time()
      
     dir_path = args.save_dir + 'preprocessed/' + str(args.dataset)  + '/'
@@ -408,7 +435,7 @@ def main():
     if args.dataset == 'igb' or args.dataset == 'ogbn-papers100M':
         data_dict = {"labels": labels, "splits": split_idx, "in_dim": graph.ndata['feat'].shape[1], "num_nodes": graph.number_of_nodes()}
     else:
-        data_dict = {"labels": labels, "splits": split_idx, "in_dim": dataset.graph['node_feat'].shape[1], "num_nodes": dataset.graph['num_nodes'], "edge_index": dataset.graph['edge_index']}
+        data_dict = {"labels": labels, "splits": split_idx, "in_dim": graph.ndata['feat'].shape[1], "num_nodes": graph.number_of_nodes(), "edge_index": graph.edges()}
     
     torch.save(data_dict, dir_path + args.dataset + '_aux.pt')
     print(f"Preprocessing done, processing time: {process_end - time_start:.2f} sec, loading time: {time_start - now:.2f} sec, total time: {time.time() - now:.2f} sec")

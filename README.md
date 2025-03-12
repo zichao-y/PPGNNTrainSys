@@ -39,10 +39,10 @@ pip install .
 
 ## **Artifact Evaluation**  
 We provide instructions for evaluating our work on the **ogbn-products** dataset.  
-Training on other datasets follows a similar workflow.
+Training on other datasets follows a similar workflow. 
 
 ### **Workflow Overview**  
-The evaluation consists of four main parts:
+The evaluation script evaluation.sh consists of four main parts:
 
 1. **Preprocessing**  
    - Convert the dataset into a format suitable for PP-GNN training.
@@ -70,7 +70,7 @@ To modify the training setup:
 
 - **Update `model_cfg.json`**  
   - Change the `"method"` parameter to **SIGN** or **SGC** to explore different models.  
-  - Modify `"training_hops"` to experiment with different numbers of hops (the training_hops argument must not exceed the parameter used for the preprocessing step, otherwise you need to redo the preprocessing with a larger training_hops). 
+  - Modify `"training_hops"` to experiment with different numbers of hops (the training_hops argument must not exceed the value of the same argument used for the preprocessing step, otherwise you need to redo the preprocessing with a larger training_hops). 
 
 - **Modify `evaluation.sh`**  
   - Adjust **GPU IDs** for the main_mp.py and the **GPUcap** parameter for auto_run.py to use different numbers of GPUs.
