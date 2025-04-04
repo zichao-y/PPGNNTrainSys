@@ -8,7 +8,7 @@ sampler_list=('LABOR')
 num_layers_list=(2 3)
 dropout_list=(0.1)
 
-base_command="CUDA_VISIBLE_DEVICES=1 python main_MPGNN.py --dataset igb --method sage --data_dir /work/zhang-capra/users/zy383/graph_data/ --hidden_channels 256 --device 0 --test_start_epoch 10 --eval_step 10 --epochs 1 --runs 5 --num_layers 3  --metric acc --save_result --batch_size 8000 --path /work/zhang-capra/users/zy383/graph_data/IGB/ --dataset_size medium"
+base_command="CUDA_VISIBLE_DEVICES=1 python main_MPGNN.py --dataset igb --method sage --data_dir /scratch/graph_data/ --hidden_channels 256 --device 0 --test_start_epoch 10 --eval_step 10 --epochs 1 --runs 5 --num_layers 3  --metric acc --save_result --batch_size 8000 --path /work/zhang-capra/users/zy383/graph_data/IGB/ --dataset_size medium"
 
 for sampler in "${sampler_list[@]}"
 do

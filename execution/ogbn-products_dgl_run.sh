@@ -4,7 +4,7 @@ method_list=('sage' 'gat')
 dropout_list=(0.5)
 sampler_list=('LABOR' 'neighbor')
 # base command
-base_command="CUDA_VISIBLE_DEVICES=1 python main_MPGNN.py --dataset ogbn-products --patience 1000 --metric acc --data_dir /work/zhang-capra/users/zy383/graph_data/ --device 0 --mode puregpu --eval_step 10 --test_start_epoch 100 --save_result --epochs 10 --runs 5 --lr 0.001 --batch_size 8000 "
+base_command="CUDA_VISIBLE_DEVICES=1 python main_MPGNN.py --dataset ogbn-products --patience 1000 --metric acc --data_dir /scratch/graph_data/ --device 0 --mode puregpu --eval_step 10 --test_start_epoch 100 --save_result --epochs 10 --runs 5 --lr 0.001 --batch_size 8000 "
 for method in "${method_list[@]}"
 do
     if [ "$method" == "sage" ]; then

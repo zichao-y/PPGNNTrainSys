@@ -3,7 +3,7 @@ num_layers_list=(2 3 4 5 6)
 method_list=('sage' 'gat')
 sampler_list=('LABOR' 'neighbor')
 # base command
-base_command="CUDA_VISIBLE_DEVICES=1 python main_MPGNN.py --metric acc --dataset wiki --patience 200 --data_dir /scratch/graph_data/wiki/ --device 0 --mode puregpu --eval_step 10 --save_result --test_start_epoch -1 --epochs 400 --runs 5 --save_result --batch_size 8000 --eval_batch_size 100000"
+base_command="CUDA_VISIBLE_DEVICES=1 python main_MPGNN.py --metric acc --dataset wiki --patience 200 --data_dir /scratch/graph_data/ --device 0 --mode puregpu --eval_step 10 --save_result --test_start_epoch -1 --epochs 400 --runs 5 --save_result --batch_size 8000 --eval_batch_size 100000"
 for method in "${method_list[@]}"
 do
     if [ "$method" == "sage" ]; then
