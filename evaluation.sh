@@ -1,6 +1,7 @@
 # step 1. data preparation
 # Can set block_size to a non-zero value to enable blocked data preprocessing for large datasets, e.g., --block_size 100000
 # For ogbn-papers100M, IGB-medium, and IGB-large, we recommend setting col_split to 8, also need to set col_split in model_cfg.json to the same number
+# For IGB datasets, we use the API provided by IGB to load the data, so the specific arguments including --path --dataset_size --in_memory need to be set
 python preprocess.py --dataset ogbn-products --data_dir ./data/ --save_dir ./data/ --training_hops 3
 
 # Single GPU evaluation

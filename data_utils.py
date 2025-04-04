@@ -125,6 +125,8 @@ def load_meta_data(args):
     if labels.dim() == 1:
         labels = labels.unsqueeze(1)
     split_idx = data_dict['splits']
+    if isinstance(split_idx, list):
+        split_idx=split_idx[0]
     #reshape labels for ogbn-papers100M since not all nodes have labels and only data with labels will be used
     if args.dataset == 'ogbn-papers100M':
         train_idx = split_idx['train']

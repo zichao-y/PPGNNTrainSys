@@ -39,7 +39,7 @@ pip install .
 
 ## **Artifact Evaluation**  
 We provide instructions for evaluating our work on the **ogbn-products** dataset.  
-Training on other datasets follows a similar workflow. 
+Training on other datasets follows a similar workflow. Training scripts for other datasets and the MPGNN baselines are provided under ./execution/
 
 ### **Workflow Overview**  
 The evaluation script evaluation.sh consists of four main parts:
